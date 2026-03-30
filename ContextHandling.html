@@ -716,6 +716,13 @@
         let history = [];
         let selectedIndices = new Set();
         let lastSelectedIndex = -1;
+        
+        // 分批加载相关状态
+        const BATCH_SIZE = 100; // 每批加载100行
+        let allLines = []; // 存储所有原始行
+        let loadedCount = 0; // 已加载的消息数
+        let isLoadingMore = false; // 是否正在加载更多
+        let fileContent = ''; // 完整文件内容（用于保存时重新生成）
 
         // DOM 元素
         const fileSelect = document.getElementById('fileSelect');
@@ -846,19 +853,36 @@
             }
         }
 
-        // 解析 JSONL
+        // 解析 JSONL（分批加载版本）
         function parseJsonl(content) {
-            messages = [];
-            const lines = content.trim().split('\n');
+            // 存储完整内容用于后续保存
+            fileContent = content;
             
-            lines.forEach((line, index) => {
-                if (!line.trim()) return;
-                
+            // 分割所有行但不立即解析
+            allLines = content.trim().split('\n').filter(line => line.trim());
+            messages = [];
+            loadedCount = 0;
+            
+            // 先加载第一批
+            loadMoreMessages(BATCH_SIZE);
+            
+            selectedIndices.clear();
+            lastSelectedIndex = -1;
+            history = [];
+        }
+        
+        // 加载更多消息
+        function loadMoreMessages(count = BATCH_SIZE) {
+            const startIndex = loadedCount;
+            const endIndex = Math.min(startIndex + count, allLines.length);
+            
+            for (let i = startIndex; i < endIndex; i++) {
+                const line = allLines[i];
                 try {
                     const data = JSON.parse(line);
                     messages.push({
-                        id: index,
-                        originalId: index,
+                        id: i,
+                        originalId: i,
                         name: data.name || '未知用户',
                         text: data.text || '',
                         raw: line,
@@ -867,13 +891,48 @@
                         mergedFrom: []
                     });
                 } catch (e) {
-                    console.warn(`解析第 ${index + 1} 行失败:`, line);
+                    console.warn(`解析第 ${i + 1} 行失败:`, line);
                 }
-            });
+            }
             
-            selectedIndices.clear();
-            lastSelectedIndex = -1;
-            history = [];
+            loadedCount = endIndex;
+            
+            // 更新状态栏显示加载进度
+            const statusText = document.getElementById('statusText');
+            if (loadedCount < allLines.length) {
+                updateStatus(`已加载 ${loadedCount}/${allLines.length} 条消息`, 'info');
+            } else {
+                updateStatus(`已加载全部 ${allLines.length} 条消息`, 'success');
+            }
+            
+            return endIndex - startIndex; // 返回实际加载的数量
+        }
+        
+        // 检查是否需要加载更多（滚动到底部时）
+        function checkLoadMore() {
+            if (isLoadingMore || loadedCount >= allLines.length) return;
+            
+            const container = chatContainer;
+            const scrollBottom = container.scrollTop + container.clientHeight;
+            const threshold = container.scrollHeight - 200; // 距离底部200px时触发
+            
+            if (scrollBottom >= threshold) {
+                isLoadingMore = true;
+                const previousScrollHeight = container.scrollHeight;
+                
+                // 加载下一批
+                loadMoreMessages(BATCH_SIZE);
+                
+                // 重新渲染
+                renderChat();
+                updateOutput();
+                updateStats();
+                
+                // 保持滚动位置，避免跳转到顶部
+                container.scrollTop = container.scrollHeight - previousScrollHeight + container.scrollTop - 100;
+                
+                isLoadingMore = false;
+            }
         }
 
         // 渲染聊天列表
@@ -924,8 +983,18 @@
                 `;
             });
             
+            // 添加"加载更多"提示和按钮
+            if (loadedCount < allLines.length) {
+                html += `
+                    <div class="load-more-indicator" style="text-align: center; padding: 20px; color: #7f8c8d; font-size: 13px; border-top: 1px dashed #ddd; margin-top: 10px;">
+                        <div>⬇️ 向下滚动加载更多 (${loadedCount}/${allLines.length} 已加载)</div>
+                        <button onclick="loadAllRemaining()" style="margin-top: 10px; padding: 6px 16px; background: #3498db; color: white; border: none; border-radius: 4px; font-size: 12px; cursor: pointer;">加载全部剩余</button>
+                    </div>
+                `;
+            }
+            
             chatContainer.innerHTML = html;
-            document.getElementById('messageCount').textContent = `${visibleCount} 条消息`;
+            document.getElementById('messageCount').textContent = `${visibleCount} 条消息${loadedCount < allLines.length ? ' (还有更多)' : ''}`;
         }
 
         // 获取前一个可见消息
@@ -1248,6 +1317,27 @@
             });
         }
 
+        // 加载全部剩余消息
+        function loadAllRemaining() {
+            if (isLoadingMore || loadedCount >= allLines.length) return;
+            
+            isLoadingMore = true;
+            updateStatus('正在加载全部消息...', 'info');
+            
+            // 使用 setTimeout 避免阻塞 UI
+            setTimeout(() => {
+                const remaining = allLines.length - loadedCount;
+                loadMoreMessages(remaining);
+                
+                renderChat();
+                updateOutput();
+                updateStats();
+                
+                isLoadingMore = false;
+                updateStatus(`已加载全部 ${allLines.length} 条消息`, 'success');
+            }, 10);
+        }
+
         // 清空聊天
         function clearChat() {
             messages = [];
@@ -1337,6 +1427,14 @@
                 e.preventDefault();
                 undoLastAction();
             }
+        });
+
+        // 滚动监听 - 实现自动加载更多
+        chatContainer.addEventListener('scroll', function() {
+            // 使用 requestAnimationFrame 优化滚动性能
+            requestAnimationFrame(() => {
+                checkLoadMore();
+            });
         });
 
         // 初始化
